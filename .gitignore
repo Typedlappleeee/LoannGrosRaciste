@@ -1,10 +1,10 @@
 __pycache__/
 *.pyc
 .env
+settings.json
 accounts.db
 accounts.txt
 seen.db
 *.sqlite
 .venv/
 venv/
-known_devs.json

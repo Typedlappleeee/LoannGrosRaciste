@@ -26,6 +26,21 @@ class Signal:
     def age_seconds(self) -> float:
         return (datetime.now(timezone.utc) - self.created_at).total_seconds()
 
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source,
+            "raw_id": self.raw_id,
+            "text": self.text,
+            "author": self.author,
+            "url": self.url,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "engagement": self.engagement,
+            "buzz_score": self.buzz_score,
+            "reason": self.reason,
+            "keywords": self.keywords,
+            "tickers": self.tickers,
+        }
+
 
 @dataclass
 class Coin:
@@ -52,6 +67,26 @@ class Coin:
             return None
         return (datetime.now(timezone.utc) - self.created_at).total_seconds() / 60
 
+    def to_dict(self) -> dict:
+        return {
+            "mint": self.mint,
+            "name": self.name,
+            "symbol": self.symbol,
+            "dex_url": self.dex_url,
+            "price_usd": self.price_usd,
+            "liquidity_usd": self.liquidity_usd,
+            "fdv": self.fdv,
+            "volume_24h": self.volume_24h,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "age_minutes": self.age_minutes(),
+            "creator": self.creator,
+            "top10_holder_pct": self.top10_holder_pct,
+            "mint_authority": self.mint_authority,
+            "freeze_authority": self.freeze_authority,
+            "is_known_dev": self.is_known_dev,
+            "known_dev_label": self.known_dev_label,
+        }
+
 
 @dataclass
 class Alert:
@@ -59,3 +94,11 @@ class Alert:
 
     signal: Signal
     coins: list[Coin] = field(default_factory=list)
+    ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def to_dict(self) -> dict:
+        return {
+            "ts": self.ts.isoformat(),
+            "signal": self.signal.to_dict(),
+            "coins": [c.to_dict() for c in self.coins],
+        }

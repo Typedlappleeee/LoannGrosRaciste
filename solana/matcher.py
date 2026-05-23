@@ -6,10 +6,7 @@ Regle metier (Phase 1) : parmi les coins lies a l'actu, on privilegie
 """
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime, timezone
-from pathlib import Path
 
 from models import Coin, Signal
 from solana.dexscreener import DexScreener
@@ -24,28 +21,16 @@ class CoinMatcher:
         dexscreener: DexScreener,
         helius: Helius,
         min_liquidity_usd: float = 2000.0,
-        known_devs_file: str = "known_devs.json",
+        known_wallets: dict[str, str] | None = None,
+        known_handles: dict[str, str] | None = None,
         enrich_top_n: int = 5,
     ) -> None:
         self.dex = dexscreener
         self.helius = helius
         self.min_liquidity_usd = min_liquidity_usd
         self.enrich_top_n = enrich_top_n
-        self.known_wallets, self.known_handles = self._load_known(known_devs_file)
-
-    @staticmethod
-    def _load_known(path_str: str) -> tuple[dict[str, str], dict[str, str]]:
-        path = Path(path_str)
-        if not path.exists():
-            return {}, {}
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-            wallets = {k: v for k, v in (data.get("wallets") or {}).items()}
-            handles = {k.lower().lstrip("@"): v for k, v in (data.get("handles") or {}).items()}
-            return wallets, handles
-        except Exception as exc:
-            log.warning("Lecture de %s impossible: %s", path, exc)
-            return {}, {}
+        self.known_wallets = known_wallets or {}
+        self.known_handles = known_handles or {}
 
     async def find(self, signal: Signal) -> list[Coin]:
         terms = self._search_terms(signal)

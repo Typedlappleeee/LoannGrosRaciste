@@ -1,9 +1,0 @@
-{
-  "_comment": "Copie en known_devs.json. Wallets deployeurs et handles X de devs reputes. Un coin cree par un de ces wallets sera marque 'dev connu' et priorise.",
-  "wallets": {
-    "EXEMPLEWa11etAddressBase58xxxxxxxxxxxxxxxxxxxx": "Dev reconnu (exemple)"
-  },
-  "handles": {
-    "exemple_kol": "KOL suivi (exemple)"
-  }
-}

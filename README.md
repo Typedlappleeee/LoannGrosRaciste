@@ -1,55 +1,61 @@
 # LoanGrosRaciste
 
-Agent automatise de veille pour le trading de memecoins sur Solana.
+Agent de veille pour le trading de memecoins Solana, **avec interface web**.
 
-**Pipeline (Phase 1)** : surveille X (Twitter) en continu → un classificateur Claude
-juge si une actu est un buzz "tradeable" → recherche les coins Solana lies
-(en priorisant le plus vieux / les devs connus) → ping un bot Discord.
+Surveille X (Twitter) en continu → un classificateur Claude juge si une actu est
+un buzz "tradeable" → recherche les coins Solana liés (priorité au plus vieux /
+aux devs connus) → affiche tout dans une interface, et peut pinger Discord.
 
-> ⚠️ **Outil de recherche/veille personnel.** Le scraping de X est contre ses CGU ;
-> utilise des comptes jetables. Aucune de ces données n'est un conseil financier.
+> ⚠️ Outil de veille personnel. Le scraping de X est contre ses CGU (utilise des
+> comptes jetables). Rien ici n'est un conseil financier.
+
+## Lancer en 2 commandes
+
+```bash
+pip install -r requirements.txt
+python main.py
+```
+
+Puis ouvre **http://127.0.0.1:8000** dans ton navigateur.
+
+## Tout se passe dans l'interface
+
+- **Réglages** : colle tes clés (Helius, Anthropic), tes comptes X, ton webhook
+  Discord, règle les seuils. Clique *Enregistrer*.
+- **Démarrer** (en haut) : lance l'agent. Le voyant passe au vert.
+- **Flux** : les alertes arrivent en direct (score, actu, coins trouvés, liquidité,
+  âge, dev connu, % top holders…), avec un panneau *Journaux*.
+- **Recherche** : scan manuel d'un mot-clé / ticker — fonctionne **sans aucune clé**
+  (test idéal pour vérifier que ça marche).
+
+### Test rapide (zéro configuration)
+
+1. `python main.py` → ouvre l'interface.
+2. Onglet **Recherche** → tape `bonk` → tu vois des coins Solana réels.
+   ✅ le pipeline fonctionne. Ensuite renseigne tes clés dans *Réglages*.
+
+## Ce qu'il faut pour le mode complet
+
+| Réglage | Pour quoi |
+|---------|-----------|
+| Comptes X jetables | Surveillance temps réel de X (sinon le flux reste vide). |
+| Clé Anthropic | Analyse IA des actus (sinon : scoring heuristique). |
+| Clé Helius | Enrichissement on-chain (dev, top holders, mint authority). |
+| Webhook Discord | Recevoir aussi les alertes sur Discord (optionnel). |
 
 ## Architecture
 
 ```
-sources/  -> collecte (X via twscrape, enfichable)
-analysis/ -> scoring de buzz (Claude, sinon heuristique) + extraction tickers/keywords
-solana/   -> DexScreener (recherche) + Helius (holders/supply/dev) + matcher
-bot/      -> bot Discord + boucle de surveillance
-store.py  -> deduplication (sqlite)
+webapp/    interface web (FastAPI + page statique)
+engine.py  moteur de surveillance (boucle collecte -> analyse -> coins -> alerte)
+sources/   collecte X (twscrape), enfichable
+analysis/  scoring buzz (Claude ou heuristique) + extraction tickers/keywords
+solana/    DexScreener + Helius + matcher (plus vieux / dev connu)
+outputs.py webhook Discord
+settings.py / store.py  config + persistance (sqlite)
 ```
 
-## Installation
+## Phase 2 (à venir)
 
-```bash
-pip install -r requirements.txt
-cp .env.example .env          # puis remplis les valeurs
-cp known_devs.example.json known_devs.json   # optionnel
-```
-
-### Ce qu'il faut fournir
-
-| Variable | Obligatoire | Comment l'obtenir |
-|----------|-------------|-------------------|
-| `DISCORD_TOKEN` | oui | discord.com/developers → application → Bot → Reset Token. Active l'intent **MESSAGE CONTENT**. |
-| `DISCORD_CHANNEL_ID` | oui | Mode dev Discord → clic droit sur le salon → Copier l'ID. |
-| `accounts.txt` | oui (sinon X muet) | Comptes X **jetables**, format `user:pass:email:email_pass` (un par ligne). |
-| `HELIUS_API_KEY` | non | dev.helius.xyz (free tier). Sans elle : pas d'analyse holders/dev. |
-| `ANTHROPIC_API_KEY` | non (recommande) | Sans elle : scoring heuristique au lieu de l'IA. |
-
-Le bot doit etre invite sur ton serveur avec les permissions *Send Messages* + *Embed Links*.
-
-## Lancement
-
-```bash
-python main.py
-```
-
-Commandes Discord : `!status`, `!scan <mot-cle>` (recherche manuelle de coins).
-
-## Limites connues / Phase 2
-
-- Le scraping X depend de comptes valides ; ils peuvent etre bannis.
-- L'analyse anti-rug / anti-bundle complete (wallets en commun, supply bundle)
-  est prevue en Phase 2 ; la Phase 1 ne fait qu'un controle leger (top holders,
-  mint authority).
+Analyse anti-rug / anti-bundle approfondie : wallets en commun, supply bundle,
+multi-trackers. La Phase 1 ne fait qu'un contrôle léger (top holders, mint authority).
