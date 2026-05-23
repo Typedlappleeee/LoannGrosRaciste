@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.env
+accounts.db
+accounts.txt
+seen.db
+*.sqlite
+.venv/
+venv/
+known_devs.json
