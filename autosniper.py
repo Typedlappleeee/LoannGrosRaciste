@@ -1,26 +1,26 @@
-"""Macro salle des ventes - Forza Horizon 6 (boucle aveugle, sans detection).
+"""Macro salle des ventes - Forza Horizon 6 (boucle aveugle, scancode materiel).
 
-Repete en boucle, le plus vite que le jeu suit :
+Repete en boucle, dans cet ordre exact :
     Echap -> Entree -> Entree -> Y -> Fleche bas -> Entree
-  (Echap/Entree/Entree relancent la recherche ; Y ouvre les options de la
-   voiture selectionnee ; bas + Entree = Acheter immediat. S'il n'y a pas de
-   voiture, ces touches ne font rien de grave.)
+  puis recommence (Echap -> ...).
+
+Les touches sont envoyees en SCANCODE MATERIEL (via SendInput), car FH6 ignore
+les touches "virtuelles" classiques (c'est pour ca que les Entree ne passaient
+pas alors qu'Echap/fleches passaient).
 
 A lancer depuis l'ecran de resultats "AUCUNE ENCHERE A AFFICHER".
 
 Touches :
   F6  -> demarre / arrete la boucle
-  F1  -> plus RAPIDE   (reduit le delai entre touches)
-  F2  -> plus LENT     (augmente le delai)
-  F3  -> appui plus court   F4 -> appui plus long  (si des touches sont ignorees)
+  F1  -> plus RAPIDE   F2 -> plus LENT      (delai entre touches)
+  F3  -> appui plus court   F4 -> appui plus long
   F12 -> quitter
 
-PC uniquement, jeu en fenetre / fenetre sans bordure, terminal en admin.
-Si les ENTREE sont ignorees meme en ralentissant : dis-le-moi, on passera a un
-envoi des touches en scancode materiel.
+WINDOWS uniquement, jeu en fenetre / fenetre sans bordure, terminal en admin.
 """
 from __future__ import annotations
 
+import ctypes
 import threading
 import time
 
@@ -36,26 +36,77 @@ STEP = 0.02
 MIN_DELAY = 0.01
 # ===========================================================================
 
-kb = keyboard.Controller()
-running = False
-
-SPECIAL = {
-    "enter": keyboard.Key.enter, "esc": keyboard.Key.esc, "escape": keyboard.Key.esc,
-    "space": keyboard.Key.space, "tab": keyboard.Key.tab,
-    "up": keyboard.Key.up, "down": keyboard.Key.down,
-    "left": keyboard.Key.left, "right": keyboard.Key.right,
+# --- envoi de touches en scancode materiel (SendInput) ---------------------
+# scancodes "Set 1" (make codes) ; True = touche etendue (fleches)
+SCANCODES = {
+    "esc": (0x01, False),
+    "enter": (0x1C, False),
+    "y": (0x15, False),
+    "down": (0x50, True),
+    "up": (0x48, True),
+    "left": (0x4B, True),
+    "right": (0x4D, True),
+    "space": (0x39, False),
+    "tab": (0x0F, False),
 }
 
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+INPUT_KEYBOARD = 1
 
-def to_key(s: str):
-    return SPECIAL.get(s.lower(), s)
+_PUL = ctypes.POINTER(ctypes.c_ulong)
+
+
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort),
+        ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", _PUL),
+    ]
+
+
+class _INPUTUNION(ctypes.Union):
+    _fields_ = [("ki", _KEYBDINPUT)]
+
+
+class _INPUT(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_ulong), ("u", _INPUTUNION)]
+
+
+try:
+    _SendInput = ctypes.windll.user32.SendInput          # type: ignore[attr-defined]
+except (AttributeError, OSError):
+    _SendInput = None  # pas sous Windows
+
+
+def _send(scan: int, extended: bool, keyup: bool) -> None:
+    if _SendInput is None:
+        return
+    flags = KEYEVENTF_SCANCODE
+    if extended:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    if keyup:
+        flags |= KEYEVENTF_KEYUP
+    ki = _KEYBDINPUT(0, scan, flags, 0, None)
+    inp = _INPUT(INPUT_KEYBOARD, _INPUTUNION(ki))
+    _SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
 
 
 def tap(key_str: str) -> None:
-    k = to_key(key_str)
-    kb.press(k)
+    sc = SCANCODES.get(key_str.lower())
+    if sc is None:
+        return
+    scan, ext = sc
+    _send(scan, ext, False)
     time.sleep(KEY_HOLD)
-    kb.release(k)
+    _send(scan, ext, True)
+
+
+# ---------------------------------------------------------------------------
+running = False
 
 
 def print_speeds() -> None:
@@ -103,7 +154,10 @@ def main() -> None:
     print(__doc__)
     print(f"Cycle : {CYCLE_KEYS}")
     print_speeds()
-    print("\nLance depuis l'ecran 'AUCUNE ENCHERE'. F6 pour demarrer/arreter, "
+    if _SendInput is None:
+        print("\n[!] SendInput indisponible (pas sous Windows ?) - les touches "
+              "ne seront pas envoyees.")
+    print("\nLance depuis l'ecran 'AUCUNE ENCHERE'. F6 demarrer/arreter, "
           "F1/F2 vitesse, F3/F4 duree d'appui, F12 quitter.\n")
     threading.Thread(target=worker, daemon=True).start()
     with keyboard.Listener(on_press=on_press) as listener:
