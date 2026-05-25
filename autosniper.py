@@ -1,29 +1,26 @@
 """Auto-sniper salle des ventes - Forza Horizon 6.
 
-Principe (la liste ne se rafraichit jamais seule : on sort et on re-rentre) :
-  1. Echap (sortir) -> on attend -> Entree (re-rentrer dans la salle)
-  2. on attend le chargement, puis on regarde la carte en haut a gauche :
-       sombre/grise -> "AUCUNE ENCHERE" -> on recommence
-       blanche      -> une voiture est la !
-  3. achat immediat : Y (options) -> Fleche bas (Acheter immediat) -> Entree
-  4. cooldown, puis on recommence a l'infini.
+A lancer depuis l'ecran de resultats vide "AUCUNE ENCHERE A AFFICHER".
 
-IMPORTANT : si ca finit par te sortir vers la map, c'est que les touches vont
-trop vite -> AUGMENTE REFRESH_KEY_DELAY (et au besoin LOAD_SETTLE) ci-dessous,
-le temps que chaque ecran s'affiche avant la touche suivante.
+Boucle (la liste ne se rafraichit jamais seule) :
+  1. Echap -> Entree -> Entree  (revient au menu recherche puis re-confirme)
+  2. courte attente de chargement
+  3. analyse la carte en haut a gauche :
+       sombre/grise -> rien -> on reboucle
+       blanche      -> une voiture ! -> Y -> Fleche bas -> Entree (achat immediat)
+  4. on recommence a l'infini.
 
-Touches de configuration :
-  F7  -> coin HAUT-GAUCHE de la zone a surveiller (a la position du curseur)
+Touches :
+  F7  -> coin HAUT-GAUCHE de la zone a surveiller (1re carte de la liste)
   F8  -> coin BAS-DROITE de la zone
-  F9  -> calibre la luminosite "liste vide" (sur l'ecran AUCUNE ENCHERE)
-  F11 -> lit la luminosite actuelle (pour comparer vide vs voiture)
+  F9  -> calibre la luminosite "vide" (sur l'ecran AUCUNE ENCHERE)
+  F11 -> lit la luminosite actuelle (comparer vide vs voiture)
   F6  -> demarre / arrete le sniper
+  F1 / F2 -> refresh plus RAPIDE / plus LENT
+  F3 / F4 -> achat plus RAPIDE / plus LENT
   F12 -> quitter
 
-Conseil zone : encadre la CARTE DU HAUT de la liste de gauche (la 1re voiture).
-Vide = fond sombre ; voiture = grand rectangle blanc -> gros ecart de luminosite.
-
-PC uniquement, jeu en mode fenetre / fenetre sans bordure, terminal en admin.
+PC uniquement, jeu en fenetre / fenetre sans bordure, terminal en admin.
 """
 from __future__ import annotations
 
@@ -34,29 +31,23 @@ import numpy as np
 from mss import mss
 from pynput import keyboard, mouse
 
-# ===== REGLAGES (ajuste si besoin) =========================================
-# Rafraichissement : la liste ne bouge pas seule, on sort (Echap) puis on
-# re-rentre (Entree). Mets [] pour desactiver (mode surveillance seule).
-REFRESH_KEYS = ["esc", "enter"]
-# Pause APRES chaque touche de rafraichissement. >>> LE REGLAGE CLE <<<
-# Trop court = l'ecran n'a pas le temps de changer et tu pars vers la map.
-# Commence large (0.4-0.5) puis reduis si tu veux aller plus vite.
-REFRESH_KEY_DELAY = 0.45
-LOAD_SETTLE = 0.55            # temps de chargement de la liste avant de regarder
-WATCH_INTERVAL = 0.05         # (mode surveillance seule uniquement)
+# ===== REGLAGES (modifiables aussi en direct avec F1-F4) ===================
+REFRESH_KEYS = ["esc", "enter", "enter"]   # Echap -> Entree -> Entree
+REFRESH_KEY_DELAY = 0.12      # pause entre chaque touche du refresh
+LOAD_SETTLE = 0.25            # attente apres le refresh avant d'analyser
 
-# Sequence d'achat quand une voiture est detectee :
-#   Y -> ouvre "Options des encheres" (curseur sur "Encherir")
-#   down -> descend sur "Acheter immediatement"
-#   enter -> valide
-# Si une confirmation supplementaire apparait, ajoute un "enter" a la fin.
-BUY_KEYS = ["y", "down", "enter"]
-BUY_KEY_DELAY = 0.15          # pause entre chaque touche d'achat
-MENU_OPEN_WAIT = 0.20         # pause apres le Y, le temps que le menu s'ouvre
+BUY_KEYS = ["y", "down", "enter"]          # options -> bas -> acheter immediat
+MENU_OPEN_WAIT = 0.12         # apres le Y, le temps que le menu s'ouvre
+BUY_KEY_DELAY = 0.06          # pause entre les touches d'achat
 
-# Detection :
-TRIGGER_DELTA = 60            # hausse de luminosite (0-255) = carte blanche = voiture
-COOLDOWN_AFTER_BUY = 1.5      # pause apres une tentative d'achat
+TRIGGER_DELTA = 60            # hausse de luminosite = carte blanche = voiture
+COOLDOWN_AFTER_BUY = 1.2      # pause apres une tentative d'achat
+WATCH_INTERVAL = 0.05         # (mode surveillance seule : REFRESH_KEYS = [])
+
+# pas de reglage des touches F1-F4
+REFRESH_STEP = 0.03
+BUY_STEP = 0.02
+MIN_DELAY = 0.02
 # ===========================================================================
 
 mouse_ctrl = mouse.Controller()
@@ -83,25 +74,14 @@ def to_key(s: str):
 def tap(key_str: str) -> None:
     k = to_key(key_str)
     kb.press(k)
-    time.sleep(0.03)
+    time.sleep(0.02)
     kb.release(k)
 
 
-def read_brightness() -> float | None:
-    if region is None:
-        return None
-    with mss() as sct:
-        img = np.asarray(sct.grab(region))     # H x W x 4 (BGRA)
-        return float(img[:, :, :3].mean())
-
-
-def do_buy() -> None:
-    print("[BUY] voiture detectee -> Y / bas / Entree")
-    for i, key_str in enumerate(BUY_KEYS):
-        tap(key_str)
-        # apres le tout premier Y, laisser le menu s'ouvrir
-        time.sleep(MENU_OPEN_WAIT if i == 0 else BUY_KEY_DELAY)
-    time.sleep(COOLDOWN_AFTER_BUY)
+def print_speeds() -> None:
+    print(f"[VITESSE] refresh: entre-touches={REFRESH_KEY_DELAY:.2f}s "
+          f"chargement={LOAD_SETTLE:.2f}s | achat: ouverture={MENU_OPEN_WAIT:.2f}s "
+          f"entre-touches={BUY_KEY_DELAY:.2f}s")
 
 
 def _sample(sct) -> float | None:
@@ -113,8 +93,16 @@ def _sample(sct) -> float | None:
         return None
 
 
+def do_buy() -> None:
+    print("[BUY] voiture detectee -> Y / bas / Entree")
+    for i, key_str in enumerate(BUY_KEYS):
+        tap(key_str)
+        time.sleep(MENU_OPEN_WAIT if i == 0 else BUY_KEY_DELAY)
+    time.sleep(COOLDOWN_AFTER_BUY)
+
+
 def worker() -> None:
-    armed = True  # (mode surveillance seule) tire sur le front vide -> voiture
+    armed = True
     with mss() as sct:
         while True:
             if not running or region is None or baseline is None:
@@ -125,27 +113,27 @@ def worker() -> None:
             trigger = baseline + TRIGGER_DELTA
 
             if REFRESH_KEYS:
-                # --- MODE RAFRAICHISSEMENT : sortir, re-rentrer, regarder ---
-                for key_str in REFRESH_KEYS:        # ex: Echap puis Entree
+                # --- refresh: Echap -> Entree -> Entree, puis analyse ---
+                for key_str in REFRESH_KEYS:
                     if not running:
                         break
                     tap(key_str)
-                    time.sleep(REFRESH_KEY_DELAY)   # laisse l'ecran s'afficher
+                    time.sleep(REFRESH_KEY_DELAY)
                 if not running:
                     continue
-                time.sleep(LOAD_SETTLE)             # laisse la liste charger
+                time.sleep(LOAD_SETTLE)
                 b = _sample(sct)
                 if b is None:
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     continue
                 if b >= trigger:
                     print(f"[DETECT] luminosite={b:.1f} (vide={baseline:.1f}) -> ACHAT")
                     do_buy()
             else:
-                # --- MODE SURVEILLANCE SEULE : front vide -> voiture ---
+                # --- surveillance seule : front vide -> voiture ---
                 b = _sample(sct)
                 if b is None:
-                    time.sleep(0.5)
+                    time.sleep(0.3)
                     continue
                 rearm = baseline + TRIGGER_DELTA * 0.5
                 if armed and b >= trigger:
@@ -171,6 +159,8 @@ def _update_region() -> None:
 
 def on_press(key) -> bool | None:
     global _corner_tl, _corner_br, baseline, running
+    global REFRESH_KEY_DELAY, LOAD_SETTLE, MENU_OPEN_WAIT, BUY_KEY_DELAY
+
     if key == keyboard.Key.f7:
         _corner_tl = tuple(int(v) for v in mouse_ctrl.position)
         print(f"[ZONE] coin haut-gauche = {_corner_tl}")
@@ -191,6 +181,22 @@ def on_press(key) -> bool | None:
         b = read_brightness()
         print(f"[LECTURE] luminosite zone = {b:.1f}" if b is not None
               else "[LECTURE] zone non definie.")
+    elif key == keyboard.Key.f1:        # refresh plus rapide
+        REFRESH_KEY_DELAY = max(MIN_DELAY, REFRESH_KEY_DELAY - REFRESH_STEP)
+        LOAD_SETTLE = max(MIN_DELAY, LOAD_SETTLE - REFRESH_STEP)
+        print_speeds()
+    elif key == keyboard.Key.f2:        # refresh plus lent
+        REFRESH_KEY_DELAY += REFRESH_STEP
+        LOAD_SETTLE += REFRESH_STEP
+        print_speeds()
+    elif key == keyboard.Key.f3:        # achat plus rapide
+        MENU_OPEN_WAIT = max(MIN_DELAY, MENU_OPEN_WAIT - BUY_STEP)
+        BUY_KEY_DELAY = max(MIN_DELAY, BUY_KEY_DELAY - BUY_STEP)
+        print_speeds()
+    elif key == keyboard.Key.f4:        # achat plus lent
+        MENU_OPEN_WAIT += BUY_STEP
+        BUY_KEY_DELAY += BUY_STEP
+        print_speeds()
     elif key == keyboard.Key.f6:
         if region is None or baseline is None:
             print("[!] Configure d'abord : zone (F7/F8) + calibration (F9).")
@@ -203,11 +209,20 @@ def on_press(key) -> bool | None:
     return None
 
 
+def read_brightness() -> float | None:
+    if region is None:
+        return None
+    with mss() as sct:
+        return _sample(sct)
+
+
 def main() -> None:
     print(__doc__)
-    print(f"Rafraichissement : {REFRESH_KEYS}  |  Achat : {BUY_KEYS}")
-    print("Etapes : F7 (haut-gauche carte) -> F8 (bas-droite carte) -> "
-          "F9 (calibrer ecran vide) -> F6 (lancer). F12 pour quitter.\n")
+    print(f"Refresh : {REFRESH_KEYS}  |  Achat : {BUY_KEYS}")
+    print_speeds()
+    print("\nLance-toi depuis l'ecran 'AUCUNE ENCHERE'. Etapes : F7 (haut-gauche "
+          "carte) -> F8 (bas-droite) -> F9 (sur ecran vide) -> F6. "
+          "F1/F2 vitesse refresh, F3/F4 vitesse achat, F12 quitter.\n")
     threading.Thread(target=worker, daemon=True).start()
     with keyboard.Listener(on_press=on_press) as listener:
         listener.join()
