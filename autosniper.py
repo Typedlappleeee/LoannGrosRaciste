@@ -1,17 +1,24 @@
-"""Auto-sniper salle des encheres.
+"""Auto-sniper salle des ventes - Forza Horizon 6.
 
-Boucle Entree -> Echap -> Entree -> Echap pour rafraichir le panneau, surveille
-une zone d'ecran (le panneau gauche), et des qu'une voiture apparait
-(panneau grise -> blanc, hausse de luminosite), declenche le bind d'achat
-immediat. Se re-arme quand le panneau redevient grise.
+Principe (mode synchrone, ordre garanti) :
+  1. rafraichit la liste (Echap puis Entree : on sort puis on re-rentre)
+  2. attend le chargement de la liste
+  3. regarde la carte en haut a gauche :
+       - sombre/grise  -> "AUCUNE ENCHERE" -> on recommence
+       - blanche       -> une voiture est la !
+  4. achat immediat : Y (options) -> Fleche bas (Acheter immediat) -> Entree
+  5. cooldown, puis on recommence
 
-Touches :
-  F7  -> enregistre le coin HAUT-GAUCHE de la zone (a la position du curseur)
-  F8  -> enregistre le coin BAS-DROITE de la zone
-  F9  -> calibre la luminosite "panneau vide" (mets le curseur ailleurs, zone vide)
+Touches de configuration :
+  F7  -> coin HAUT-GAUCHE de la zone a surveiller (a la position du curseur)
+  F8  -> coin BAS-DROITE de la zone
+  F9  -> calibre la luminosite "liste vide" (sur l'ecran AUCUNE ENCHERE)
+  F11 -> lit la luminosite actuelle (pour comparer vide vs voiture)
   F6  -> demarre / arrete le sniper
-  F11 -> affiche en continu la luminosite de la zone (pour calibrer le seuil)
   F12 -> quitter
+
+Conseil zone : encadre la CARTE DU HAUT de la liste de gauche (la 1re voiture).
+Vide = fond sombre ; voiture = grand rectangle blanc -> gros ecart de luminosite.
 
 PC uniquement, jeu en mode fenetre / fenetre sans bordure, terminal en admin.
 """
@@ -24,39 +31,40 @@ import numpy as np
 from mss import mss
 from pynput import keyboard, mouse
 
-# ===== REGLAGES ============================================================
-# Sequence de rafraichissement envoyee en boucle :
-CYCLE_KEYS = ["enter", "esc"]      # -> entree, echap, entree, echap, ...
-CYCLE_DELAY = 0.25                 # secondes entre chaque touche
+# ===== REGLAGES (ajuste si besoin) =========================================
+# Rafraichissement de la liste (sortir puis re-rentrer pour relancer la requete)
+REFRESH_KEYS = ["esc", "enter"]
+REFRESH_KEY_DELAY = 0.18      # pause entre les touches de rafraichissement
+LOAD_SETTLE = 0.45            # temps de chargement de la liste avant de regarder
 
-# Touche(s) du bind "achat immediat" a envoyer quand une voiture est detectee :
-BUY_KEYS = ["enter"]               # ex: ["e"], ["enter"], ["space"]...
-# Optionnel : cliquer a une position au lieu / en plus (None pour desactiver)
-BUY_CLICK = None                   # ex: (1280, 720)
+# Sequence d'achat quand une voiture est detectee :
+#   Y -> ouvre "Options des encheres" (curseur sur "Encherir")
+#   down -> descend sur "Acheter immediatement"
+#   enter -> valide
+# Si une confirmation supplementaire apparait, ajoute un "enter" a la fin.
+BUY_KEYS = ["y", "down", "enter"]
+BUY_KEY_DELAY = 0.15          # pause entre chaque touche d'achat
+MENU_OPEN_WAIT = 0.20         # pause apres le Y, le temps que le menu s'ouvre
 
 # Detection :
-TRIGGER_DELTA = 35                 # hausse de luminosite (0-255) = voiture presente
-COOLDOWN_AFTER_BUY = 1.0           # pause apres un achat
-WATCH_INTERVAL = 0.03              # frequence de capture ecran
+TRIGGER_DELTA = 60            # hausse de luminosite (0-255) = carte blanche = voiture
+COOLDOWN_AFTER_BUY = 1.5      # pause apres une tentative d'achat
 # ===========================================================================
 
 mouse_ctrl = mouse.Controller()
 kb = keyboard.Controller()
 
-region: dict | None = None          # {"left","top","width","height"} pour mss
+region: dict | None = None
 _corner_tl: tuple[int, int] | None = None
 _corner_br: tuple[int, int] | None = None
-baseline: float | None = None       # luminosite "vide"
+baseline: float | None = None
 running = False
-show_brightness = False
-_buying = False
 
 SPECIAL = {
     "enter": keyboard.Key.enter, "esc": keyboard.Key.esc, "escape": keyboard.Key.esc,
     "space": keyboard.Key.space, "tab": keyboard.Key.tab,
     "up": keyboard.Key.up, "down": keyboard.Key.down,
     "left": keyboard.Key.left, "right": keyboard.Key.right,
-    "backspace": keyboard.Key.backspace,
 }
 
 
@@ -71,66 +79,56 @@ def tap(key_str: str) -> None:
     kb.release(k)
 
 
-def grab_brightness(sct) -> float:
-    img = np.asarray(sct.grab(region))      # H x W x 4 (BGRA)
-    return float(img[:, :, :3].mean())
+def read_brightness() -> float | None:
+    if region is None:
+        return None
+    with mss() as sct:
+        img = np.asarray(sct.grab(region))     # H x W x 4 (BGRA)
+        return float(img[:, :, :3].mean())
 
 
 def do_buy() -> None:
-    global _buying
-    _buying = True
-    print("[BUY] voiture detectee -> achat immediat !")
-    if BUY_CLICK:
-        mouse_ctrl.position = BUY_CLICK
-        time.sleep(0.02)
-        mouse_ctrl.click(mouse.Button.left, 1)
-    for key_str in BUY_KEYS:
+    print("[BUY] voiture detectee -> Y / bas / Entree")
+    for i, key_str in enumerate(BUY_KEYS):
         tap(key_str)
-        time.sleep(0.05)
+        # apres le tout premier Y, laisser le menu s'ouvrir
+        time.sleep(MENU_OPEN_WAIT if i == 0 else BUY_KEY_DELAY)
     time.sleep(COOLDOWN_AFTER_BUY)
-    _buying = False
 
 
-def cycler() -> None:
-    """Envoie la sequence Entree/Echap en boucle pour rafraichir le panneau."""
-    while True:
-        if running and not _buying:
-            for key_str in CYCLE_KEYS:
-                if not running or _buying:
-                    break
-                tap(key_str)
-                time.sleep(CYCLE_DELAY)
-        else:
-            time.sleep(0.05)
-
-
-def watcher() -> None:
-    """Surveille la zone et declenche l'achat sur le front grise -> blanc."""
-    armed = True
+def worker() -> None:
     with mss() as sct:
         while True:
             if not running or region is None or baseline is None:
                 time.sleep(0.1)
                 continue
+
+            # 1) rafraichir la liste
+            for key_str in REFRESH_KEYS:
+                if not running:
+                    break
+                tap(key_str)
+                time.sleep(REFRESH_KEY_DELAY)
+            if not running:
+                continue
+
+            # 2) attendre le chargement
+            time.sleep(LOAD_SETTLE)
+
+            # 3) regarder la carte du haut
             try:
-                b = grab_brightness(sct)
+                img = np.asarray(sct.grab(region))
+                b = float(img[:, :, :3].mean())
             except Exception as exc:
                 print("[WATCH] capture impossible:", exc)
                 time.sleep(0.5)
                 continue
 
-            if show_brightness:
-                print(f"[WATCH] luminosite={b:.1f} (vide={baseline:.1f}, "
-                      f"seuil={baseline + TRIGGER_DELTA:.1f}) armed={armed}")
-
-            trigger = baseline + TRIGGER_DELTA
-            rearm = baseline + TRIGGER_DELTA * 0.5
-            if armed and b >= trigger and not _buying:
-                armed = False
+            # 4) voiture presente ?
+            if b >= baseline + TRIGGER_DELTA:
+                print(f"[DETECT] luminosite={b:.1f} (vide={baseline:.1f}) -> ACHAT")
                 do_buy()
-            elif not armed and b <= rearm:
-                armed = True               # panneau revenu vide -> pret a re-snipe
-            time.sleep(WATCH_INTERVAL)
+            # sinon on reboucle (rafraichit a nouveau)
 
 
 def _update_region() -> None:
@@ -146,7 +144,7 @@ def _update_region() -> None:
 
 
 def on_press(key) -> bool | None:
-    global _corner_tl, _corner_br, baseline, running, show_brightness
+    global _corner_tl, _corner_br, baseline, running
     if key == keyboard.Key.f7:
         _corner_tl = tuple(int(v) for v in mouse_ctrl.position)
         print(f"[ZONE] coin haut-gauche = {_corner_tl}")
@@ -156,15 +154,17 @@ def on_press(key) -> bool | None:
         print(f"[ZONE] coin bas-droite = {_corner_br}")
         _update_region()
     elif key == keyboard.Key.f9:
-        if region is None:
+        b = read_brightness()
+        if b is None:
             print("[CALIB] definis d'abord la zone (F7 puis F8).")
         else:
-            with mss() as sct:
-                baseline = grab_brightness(sct)
-            print(f"[CALIB] luminosite vide = {baseline:.1f}")
+            baseline = b
+            print(f"[CALIB] luminosite vide = {baseline:.1f} "
+                  f"(seuil achat = {baseline + TRIGGER_DELTA:.1f})")
     elif key == keyboard.Key.f11:
-        show_brightness = not show_brightness
-        print(f"[DEBUG] affichage luminosite {'ON' if show_brightness else 'OFF'}")
+        b = read_brightness()
+        print(f"[LECTURE] luminosite zone = {b:.1f}" if b is not None
+              else "[LECTURE] zone non definie.")
     elif key == keyboard.Key.f6:
         if region is None or baseline is None:
             print("[!] Configure d'abord : zone (F7/F8) + calibration (F9).")
@@ -179,10 +179,10 @@ def on_press(key) -> bool | None:
 
 def main() -> None:
     print(__doc__)
-    print("Etapes : F7 (coin haut-gauche) -> F8 (coin bas-droite) -> "
-          "F9 (calibrer zone vide) -> F6 (lancer). F11 pour calibrer le seuil.\n")
-    threading.Thread(target=cycler, daemon=True).start()
-    threading.Thread(target=watcher, daemon=True).start()
+    print(f"Rafraichissement : {REFRESH_KEYS}  |  Achat : {BUY_KEYS}")
+    print("Etapes : F7 (haut-gauche carte) -> F8 (bas-droite carte) -> "
+          "F9 (calibrer ecran vide) -> F6 (lancer). F12 pour quitter.\n")
+    threading.Thread(target=worker, daemon=True).start()
     with keyboard.Listener(on_press=on_press) as listener:
         listener.join()
 
