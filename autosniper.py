@@ -1,13 +1,13 @@
 """Auto-sniper salle des ventes - Forza Horizon 6.
 
-Principe (mode synchrone, ordre garanti) :
-  1. rafraichit la liste (Echap puis Entree : on sort puis on re-rentre)
-  2. attend le chargement de la liste
-  3. regarde la carte en haut a gauche :
-       - sombre/grise  -> "AUCUNE ENCHERE" -> on recommence
-       - blanche       -> une voiture est la !
-  4. achat immediat : Y (options) -> Fleche bas (Acheter immediat) -> Entree
-  5. cooldown, puis on recommence
+Principe (mode SURVEILLANCE SEULE par defaut, ne touche a aucun menu) :
+  - regarde la carte en haut a gauche de la salle des ventes :
+       sombre/grise -> "AUCUNE ENCHERE" ; blanche -> une voiture est la !
+  - des qu'une voiture apparait (front vide -> blanc) :
+       achat immediat : Y (options) -> Fleche bas (Acheter immediat) -> Entree
+  - se re-arme quand la carte redevient vide.
+Le rafraichissement automatique de la liste est DESACTIVE par defaut
+(REFRESH_KEYS = []) pour ne pas te faire sortir de la salle.
 
 Touches de configuration :
   F7  -> coin HAUT-GAUCHE de la zone a surveiller (a la position du curseur)
@@ -32,10 +32,16 @@ from mss import mss
 from pynput import keyboard, mouse
 
 # ===== REGLAGES (ajuste si besoin) =========================================
-# Rafraichissement de la liste (sortir puis re-rentrer pour relancer la requete)
-REFRESH_KEYS = ["esc", "enter"]
+# Touches de rafraichissement de la liste.
+#   []  = MODE SURVEILLANCE SEULE (recommande au depart) : le bot ne touche a
+#         AUCUN menu, il reste dans la salle et achete uniquement quand une
+#         voiture apparait. Il ne peut donc pas te sortir vers la map.
+#   ex: ["esc", "enter"] = essaie de rafraichir (a n'utiliser que si tu m'as
+#         donne la bonne sequence pour relancer la liste sans quitter la salle).
+REFRESH_KEYS: list[str] = []
 REFRESH_KEY_DELAY = 0.18      # pause entre les touches de rafraichissement
 LOAD_SETTLE = 0.45            # temps de chargement de la liste avant de regarder
+WATCH_INTERVAL = 0.05         # frequence de verification en mode surveillance
 
 # Sequence d'achat quand une voiture est detectee :
 #   Y -> ouvre "Options des encheres" (curseur sur "Encherir")
@@ -97,25 +103,26 @@ def do_buy() -> None:
 
 
 def worker() -> None:
+    armed = True  # ne tire que sur le front "vide -> voiture", puis se re-arme
     with mss() as sct:
         while True:
             if not running or region is None or baseline is None:
+                armed = True
                 time.sleep(0.1)
                 continue
 
-            # 1) rafraichir la liste
-            for key_str in REFRESH_KEYS:
+            # 1) rafraichir la liste (uniquement si des touches sont definies)
+            if REFRESH_KEYS:
+                for key_str in REFRESH_KEYS:
+                    if not running:
+                        break
+                    tap(key_str)
+                    time.sleep(REFRESH_KEY_DELAY)
                 if not running:
-                    break
-                tap(key_str)
-                time.sleep(REFRESH_KEY_DELAY)
-            if not running:
-                continue
+                    continue
+                time.sleep(LOAD_SETTLE)
 
-            # 2) attendre le chargement
-            time.sleep(LOAD_SETTLE)
-
-            # 3) regarder la carte du haut
+            # 2) regarder la carte du haut
             try:
                 img = np.asarray(sct.grab(region))
                 b = float(img[:, :, :3].mean())
@@ -124,11 +131,18 @@ def worker() -> None:
                 time.sleep(0.5)
                 continue
 
-            # 4) voiture presente ?
-            if b >= baseline + TRIGGER_DELTA:
+            # 3) front vide -> voiture : on achete ; on se re-arme quand ca redevient vide
+            trigger = baseline + TRIGGER_DELTA
+            rearm = baseline + TRIGGER_DELTA * 0.5
+            if armed and b >= trigger:
                 print(f"[DETECT] luminosite={b:.1f} (vide={baseline:.1f}) -> ACHAT")
+                armed = False
                 do_buy()
-            # sinon on reboucle (rafraichit a nouveau)
+            elif not armed and b <= rearm:
+                armed = True
+
+            if not REFRESH_KEYS:
+                time.sleep(WATCH_INTERVAL)
 
 
 def _update_region() -> None:
