@@ -1,32 +1,33 @@
-"""Auto-sniper salle des ventes - Forza Horizon 6.
+"""Auto-sniper salle des ventes - Forza Horizon 6 (detection par POPUP).
 
-A lancer depuis l'ecran de resultats vide "AUCUNE ENCHERE A AFFICHER".
+Idee : on ne detecte plus la voiture dans la liste (le menu est blanc -> faux
+positifs). A la place :
 
-Boucle :
-  1. REFRESH_KEYS (def: Echap -> Entree -> Entree) pour relancer la recherche
-  2. courte attente de chargement
-  3. analyse la carte en haut a gauche (front SOMBRE -> BLANC = voiture) :
-       voiture -> Y -> Fleche bas -> Entree (achat immediat)
-  4. on recommence.
+  CYCLE en boucle : Echap -> Entree -> Entree -> Y
+    - Y ouvre "Options des encheres" SI une voiture est selectionnee.
+    - pas de voiture -> Y n'ouvre rien -> le cycle recommence.
+  Apres le Y, on regarde le CENTRE de l'ecran :
+    - une fenetre BLANCHE s'est ouverte -> voiture ! -> Fleche bas -> Entree
+    - rien -> on reboucle.
 
->>> COMMENCE EN MODE TEST (n'achete PAS) <<<
-Le mode test affiche la luminosite et "voiture detectee" sans appuyer sur Y,
-pour verifier que la navigation reste dans la salle et que la detection est
-bonne. Quand tout est OK, appuie F10 pour activer l'achat reel.
+Le fond d'ecran de FH6 est anime (du blanc qui bouge), donc on calibre en
+mesurant le MAX du fond pendant ~2s : seule la vraie fenetre (plus claire et
+uniforme) depasse le seuil.
+
+>>> COMMENCE EN MODE TEST (n'achete pas). F10 pour activer l'achat reel. <<<
 
 Touches :
-  F7  -> coin HAUT-GAUCHE de la zone (1re carte de la liste, a GAUCHE)
+  F7  -> coin HAUT-GAUCHE de la zone = LE CENTRE, la ou s'ouvre la fenetre blanche
   F8  -> coin BAS-DROITE de la zone
-  F9  -> calibre la luminosite "vide" (sur l'ecran AUCUNE ENCHERE)
-  F11 -> lit la luminosite actuelle
+  F9  -> calibre le FOND (~2s) : laisse l'ecran NORMAL, sans fenetre ouverte
+  F11 -> lit la luminosite actuelle de la zone
   F6  -> demarre / arrete
   F10 -> bascule MODE TEST <-> ACHAT REEL
-  F1 / F2 -> refresh plus RAPIDE / plus LENT
+  F1 / F2 -> cycle plus RAPIDE / plus LENT
   F3 / F4 -> achat plus RAPIDE / plus LENT
   F12 -> quitter
 
-Conseil zone : place-la sur la PARTIE GAUCHE ou apparait la carte voiture
-(fond blanc), PAS au centre (le menu de recherche y est blanc -> faux positifs).
+PC uniquement, jeu en fenetre / fenetre sans bordure, terminal en admin.
 """
 from __future__ import annotations
 
@@ -38,19 +39,18 @@ from mss import mss
 from pynput import keyboard, mouse
 
 # ===== REGLAGES (modifiables en direct : F1-F4) ============================
-REFRESH_KEYS = ["esc", "enter", "enter"]   # relance la recherche
-REFRESH_KEY_DELAY = 0.12
-LOAD_SETTLE = 0.25
+CYCLE_KEYS = ["esc", "enter", "enter", "y"]   # le cycle complet
+CYCLE_KEY_DELAY = 0.12        # pause entre chaque touche du cycle
+POPUP_WAIT = 0.18             # apres le Y, laisser la fenetre s'ouvrir
 
-BUY_KEYS = ["y", "down", "enter"]
-MENU_OPEN_WAIT = 0.12
-BUY_KEY_DELAY = 0.06
+BUY_KEYS = ["down", "enter"]  # fenetre ouverte -> descendre -> acheter immediat
+BUY_KEY_DELAY = 0.08
 
-TRIGGER_DELTA = 60
-COOLDOWN_AFTER_BUY = 1.2
-WATCH_INTERVAL = 0.05
+POPUP_DELTA = 45              # marge de luminosite au-dessus du fond = fenetre
+COOLDOWN_AFTER_BUY = 1.5
+CALIB_SECONDS = 2.0           # duree de mesure du fond a la calibration (F9)
 
-REFRESH_STEP = 0.03
+CYCLE_STEP = 0.03
 BUY_STEP = 0.02
 MIN_DELAY = 0.02
 # ===========================================================================
@@ -61,9 +61,9 @@ kb = keyboard.Controller()
 region: dict | None = None
 _corner_tl: tuple[int, int] | None = None
 _corner_br: tuple[int, int] | None = None
-baseline: float | None = None
+baseline: float | None = None   # luminosite MAX du fond (sans fenetre)
 running = False
-test_mode = True       # commence sans acheter
+test_mode = True
 
 SPECIAL = {
     "enter": keyboard.Key.enter, "esc": keyboard.Key.esc, "escape": keyboard.Key.esc,
@@ -85,9 +85,8 @@ def tap(key_str: str) -> None:
 
 
 def print_speeds() -> None:
-    print(f"[VITESSE] refresh entre-touches={REFRESH_KEY_DELAY:.2f}s "
-          f"chargement={LOAD_SETTLE:.2f}s | achat ouverture={MENU_OPEN_WAIT:.2f}s "
-          f"entre-touches={BUY_KEY_DELAY:.2f}s")
+    print(f"[VITESSE] cycle entre-touches={CYCLE_KEY_DELAY:.2f}s "
+          f"attente-fenetre={POPUP_WAIT:.2f}s | achat entre-touches={BUY_KEY_DELAY:.2f}s")
 
 
 def _sample(sct) -> float | None:
@@ -100,58 +99,48 @@ def _sample(sct) -> float | None:
 
 
 def do_buy() -> None:
-    print("[BUY] achat -> Y / bas / Entree")
-    for i, key_str in enumerate(BUY_KEYS):
+    print("[BUY] fenetre ouverte -> bas / Entree (achat immediat)")
+    for key_str in BUY_KEYS:
         tap(key_str)
-        time.sleep(MENU_OPEN_WAIT if i == 0 else BUY_KEY_DELAY)
+        time.sleep(BUY_KEY_DELAY)
     time.sleep(COOLDOWN_AFTER_BUY)
 
 
 def worker() -> None:
-    armed = True
     with mss() as sct:
         while True:
             if not running or region is None or baseline is None:
-                armed = True
                 time.sleep(0.1)
                 continue
 
-            # refresh (si configure)
-            if REFRESH_KEYS:
-                for key_str in REFRESH_KEYS:
-                    if not running:
-                        break
-                    tap(key_str)
-                    time.sleep(REFRESH_KEY_DELAY)
+            # 1) cycle : Echap -> Entree -> Entree -> Y
+            for key_str in CYCLE_KEYS:
                 if not running:
-                    continue
-                time.sleep(LOAD_SETTLE)
+                    break
+                tap(key_str)
+                time.sleep(CYCLE_KEY_DELAY)
+            if not running:
+                continue
 
+            # 2) laisser la fenetre s'ouvrir, puis regarder le centre
+            time.sleep(POPUP_WAIT)
             b = _sample(sct)
             if b is None:
                 time.sleep(0.3)
                 continue
 
-            trigger = baseline + TRIGGER_DELTA
-            rearm = baseline + TRIGGER_DELTA * 0.5
+            trigger = baseline + POPUP_DELTA
+            popup = b >= trigger
 
             if test_mode:
-                etat = "VOITURE ?" if b >= trigger else "vide"
-                print(f"[TEST] lum={b:.1f} (seuil={trigger:.1f}) -> {etat}"
-                      + ("  [arme]" if armed else "  [deja tire]"))
+                print(f"[TEST] centre lum={b:.1f} (seuil={trigger:.1f}) -> "
+                      + ("FENETRE = VOITURE" if popup else "rien"))
 
-            # front sombre -> blanc : on tire une seule fois, puis re-arme
-            if armed and b >= trigger:
-                armed = False
+            if popup:
                 if test_mode:
-                    print("   >>> voiture detectee : ACHAT SIMULE (F10 pour activer)")
+                    print("   >>> fenetre detectee : ACHAT SIMULE (F10 pour activer)")
                 else:
                     do_buy()
-            elif not armed and b <= rearm:
-                armed = True
-
-            if not REFRESH_KEYS:
-                time.sleep(WATCH_INTERVAL)
 
 
 def _update_region() -> None:
@@ -173,9 +162,31 @@ def read_brightness() -> float | None:
         return _sample(sct)
 
 
+def calibrate_background() -> None:
+    """Mesure le fond pendant CALIB_SECONDS et retient son MAX."""
+    global baseline
+    if region is None:
+        print("[CALIB] definis d'abord la zone (F7 puis F8).")
+        return
+    vals = []
+    end = time.time() + CALIB_SECONDS
+    with mss() as sct:
+        while time.time() < end:
+            v = _sample(sct)
+            if v is not None:
+                vals.append(v)
+            time.sleep(0.03)
+    if not vals:
+        print("[CALIB] echec.")
+        return
+    baseline = max(vals)
+    print(f"[CALIB] fond: min={min(vals):.1f} moy={sum(vals)/len(vals):.1f} "
+          f"MAX={baseline:.1f} -> seuil fenetre = {baseline + POPUP_DELTA:.1f}")
+
+
 def on_press(key) -> bool | None:
-    global _corner_tl, _corner_br, baseline, running, test_mode
-    global REFRESH_KEY_DELAY, LOAD_SETTLE, MENU_OPEN_WAIT, BUY_KEY_DELAY
+    global _corner_tl, _corner_br, running, test_mode
+    global CYCLE_KEY_DELAY, POPUP_WAIT, BUY_KEY_DELAY
 
     if key == keyboard.Key.f7:
         _corner_tl = tuple(int(v) for v in mouse_ctrl.position)
@@ -186,13 +197,7 @@ def on_press(key) -> bool | None:
         print(f"[ZONE] coin bas-droite = {_corner_br}")
         _update_region()
     elif key == keyboard.Key.f9:
-        b = read_brightness()
-        if b is None:
-            print("[CALIB] definis d'abord la zone (F7 puis F8).")
-        else:
-            baseline = b
-            print(f"[CALIB] luminosite vide = {baseline:.1f} "
-                  f"(seuil achat = {baseline + TRIGGER_DELTA:.1f})")
+        calibrate_background()
     elif key == keyboard.Key.f11:
         b = read_brightness()
         print(f"[LECTURE] luminosite zone = {b:.1f}" if b is not None
@@ -201,24 +206,22 @@ def on_press(key) -> bool | None:
         test_mode = not test_mode
         print(f"[MODE] {'TEST (n achete pas)' if test_mode else 'ACHAT REEL ACTIF'}")
     elif key == keyboard.Key.f1:
-        REFRESH_KEY_DELAY = max(MIN_DELAY, REFRESH_KEY_DELAY - REFRESH_STEP)
-        LOAD_SETTLE = max(MIN_DELAY, LOAD_SETTLE - REFRESH_STEP)
+        CYCLE_KEY_DELAY = max(MIN_DELAY, CYCLE_KEY_DELAY - CYCLE_STEP)
+        POPUP_WAIT = max(MIN_DELAY, POPUP_WAIT - CYCLE_STEP)
         print_speeds()
     elif key == keyboard.Key.f2:
-        REFRESH_KEY_DELAY += REFRESH_STEP
-        LOAD_SETTLE += REFRESH_STEP
+        CYCLE_KEY_DELAY += CYCLE_STEP
+        POPUP_WAIT += CYCLE_STEP
         print_speeds()
     elif key == keyboard.Key.f3:
-        MENU_OPEN_WAIT = max(MIN_DELAY, MENU_OPEN_WAIT - BUY_STEP)
         BUY_KEY_DELAY = max(MIN_DELAY, BUY_KEY_DELAY - BUY_STEP)
         print_speeds()
     elif key == keyboard.Key.f4:
-        MENU_OPEN_WAIT += BUY_STEP
         BUY_KEY_DELAY += BUY_STEP
         print_speeds()
     elif key == keyboard.Key.f6:
         if region is None or baseline is None:
-            print("[!] Configure d'abord : zone (F7/F8) + calibration (F9).")
+            print("[!] Configure d'abord : zone (F7/F8) + calibration fond (F9).")
         else:
             running = not running
             print(f"[SNIPER] {'ON ▶' if running else 'OFF ⏸'}  "
@@ -231,11 +234,10 @@ def on_press(key) -> bool | None:
 
 def main() -> None:
     print(__doc__)
-    print(f"Refresh : {REFRESH_KEYS}  |  Achat : {BUY_KEYS}")
+    print(f"Cycle : {CYCLE_KEYS}  |  Achat apres fenetre : {BUY_KEYS}")
     print_speeds()
-    print("\n>>> MODE TEST ACTIF (n'achete pas). Verifie d'abord la navigation, "
-          "puis F10 pour activer l'achat reel.\n"
-          "Etapes : F7 -> F8 -> F9 (ecran vide) -> F6.\n")
+    print("\n>>> MODE TEST ACTIF (n'achete pas). Verifie d'abord, puis F10.\n"
+          "Zone = LE CENTRE (fenetre blanche). Etapes : F7 -> F8 -> F9 (fond) -> F6.\n")
     threading.Thread(target=worker, daemon=True).start()
     with keyboard.Listener(on_press=on_press) as listener:
         listener.join()
