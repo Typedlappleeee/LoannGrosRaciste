@@ -40,11 +40,12 @@ from pynput import keyboard, mouse
 
 # ===== REGLAGES (modifiables en direct : F1-F4) ============================
 CYCLE_KEYS = ["esc", "enter", "enter", "y"]   # le cycle complet
-CYCLE_KEY_DELAY = 0.12        # pause entre chaque touche du cycle
-POPUP_WAIT = 0.18             # apres le Y, laisser la fenetre s'ouvrir
+CYCLE_KEY_DELAY = 0.40        # pause entre chaque touche (laisse le menu s'afficher)
+POPUP_WAIT = 0.35             # apres le Y, laisser la fenetre s'ouvrir
+KEY_HOLD = 0.05               # duree d'appui de chaque touche (registre mieux)
 
 BUY_KEYS = ["down", "enter"]  # fenetre ouverte -> descendre -> acheter immediat
-BUY_KEY_DELAY = 0.08
+BUY_KEY_DELAY = 0.12
 
 POPUP_DELTA = 45              # marge de luminosite au-dessus du fond = fenetre
 COOLDOWN_AFTER_BUY = 1.5
@@ -80,7 +81,7 @@ def to_key(s: str):
 def tap(key_str: str) -> None:
     k = to_key(key_str)
     kb.press(k)
-    time.sleep(0.02)
+    time.sleep(KEY_HOLD)
     kb.release(k)
 
 
