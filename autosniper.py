@@ -77,12 +77,18 @@ class _INPUT(ctypes.Structure):
 
 
 try:
-    _SendInput = ctypes.windll.user32.SendInput          # type: ignore[attr-defined]
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)   # type: ignore[attr-defined]
+    _SendInput = _user32.SendInput
+    _SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(_INPUT), ctypes.c_int)
+    _SendInput.restype = ctypes.c_uint
 except (AttributeError, OSError):
     _SendInput = None  # pas sous Windows
 
+_send_failed = False
+
 
 def _send(scan: int, extended: bool, keyup: bool) -> None:
+    global _send_failed
     if _SendInput is None:
         return
     flags = KEYEVENTF_SCANCODE
@@ -92,7 +98,11 @@ def _send(scan: int, extended: bool, keyup: bool) -> None:
         flags |= KEYEVENTF_KEYUP
     ki = _KEYBDINPUT(0, scan, flags, 0, None)
     inp = _INPUT(INPUT_KEYBOARD, _INPUTUNION(ki))
-    _SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+    n = _SendInput(1, ctypes.byref(inp), ctypes.sizeof(_INPUT))
+    if n != 1 and not _send_failed:
+        _send_failed = True
+        print(f"[!] SendInput a echoue (n={n}, err={ctypes.get_last_error()}). "
+              "Lance PowerShell en tant qu'ADMINISTRATEUR et reessaie.")
 
 
 def tap(key_str: str) -> None:
