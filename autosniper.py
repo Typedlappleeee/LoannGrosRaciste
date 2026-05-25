@@ -68,8 +68,21 @@ class _KEYBDINPUT(ctypes.Structure):
     ]
 
 
+class _MOUSEINPUT(ctypes.Structure):
+    # presente uniquement pour que l'union ait la bonne TAILLE (sinon SendInput
+    # renvoie l'erreur 87 : la struct INPUT serait trop petite).
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", _PUL),
+    ]
+
+
 class _INPUTUNION(ctypes.Union):
-    _fields_ = [("ki", _KEYBDINPUT)]
+    _fields_ = [("ki", _KEYBDINPUT), ("mi", _MOUSEINPUT)]
 
 
 class _INPUT(ctypes.Structure):
